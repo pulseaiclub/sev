@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go ${{ matrix.go }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.25.x', stable]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false # Both modules use only the standard library; no go.sum.
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: Test with race detection
+        # Timing assertions are unsuitable for shared runners and race builds.
+        run: go test -race -short ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Check the data generator
+        working-directory: tools/genspecs
+        run: |
+          go test ./...
+          go vet ./...
+      - name: Verify generated command data
+        if: matrix.go == '1.25.x'
+        run: |
+          go -C tools/genspecs run . -out "$RUNNER_TEMP/specdb.bin.gz"
+          cmp specdb.bin.gz "$RUNNER_TEMP/specdb.bin.gz"
+      - name: Build example CLI
+        run: go build ./cmd/sev

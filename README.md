@@ -50,6 +50,13 @@ runs without a deadline.
 
 ## Use
 
+Requires Go 1.25 or newer. Once the repository is public, install the latest
+released version with:
+
+```sh
+go get github.com/pulseaiclub/sev@latest
+```
+
 ```go
 e, err := sev.New(sev.Options{Limit: 10})
 if err != nil {
@@ -160,6 +167,35 @@ inline overlays, keybinding parsing, themes, config files, self-update, shell
 startup scripts, AI suggestions (a host with an LLM routes that itself), and
 persistence (history lives in the host's store, which is one interface away).
 
+## Releasing
+
+Git tags publish this Go module; GitHub Releases provide release notes. CI tests
+Go 1.25 and the latest stable Go version, runs the race detector and vet, checks
+formatting, builds the example CLI, and verifies that Go 1.25 reproduces the
+committed command data. Timing assertions are skipped on shared CI runners.
+
+To release a tested commit on `main`, push it and a version tag:
+
+```sh
+git push origin main
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+The release workflow runs CI against the tagged commit before creating a GitHub
+Release with generated notes. Tags such as `v0.1.0-rc.1` create prereleases.
+It uses the built-in `GITHUB_TOKEN`; no publishing secret is needed. Re-running
+it leaves an existing release intact. Release tags should never be moved or
+reused: Go module proxies cache published versions.
+
+Consumers pin a release with `go get github.com/pulseaiclub/sev@v0.1.0`. The
+example CLI can be installed with `go install github.com/pulseaiclub/sev/cmd/sev@v0.1.0`.
+Go downloads the module source, including the embedded spec database, so this
+library does not need binary release assets or a separate package registry.
+While the repository is private, consumers still need GitHub access; public
+module proxy access becomes available after the repository is made public.
+A future v2 release requires changing the module path to end in `/v2` first.
+
 ## Test
 
 ```
@@ -167,3 +203,7 @@ go test ./...            # unit + budget assertions
 go test -bench . ./      # the numbers above
 go vet ./... && gofmt -l .
 ```
+
+## License
+
+[MIT](LICENSE). Copyright (c) 2026 pulseaiclub.
