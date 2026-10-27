@@ -13,8 +13,8 @@ import (
 type Options struct {
 	// Limit is how many items Complete returns when Request.Limit is zero.
 	Limit int
-	// GeneratorBudget bounds the slow sources for one call. Everything else
-	// (spec tree, history) is memory-only and finishes in microseconds. A
+	// GeneratorBudget bounds the built-in slow sources for one call. The spec
+	// tree and history are memory-only and finish in microseconds. A
 	// generator that has not answered when the budget expires contributes no
 	// rows; one that ignores its context cannot be preempted, so implementations
 	// are expected to check ctx (the bundled ones do).
@@ -30,6 +30,9 @@ type Options struct {
 	// History is the in-memory signal store. When nil the engine allocates one,
 	// so a host can start completing before it has any history.
 	History *History
+	// CompletionHook optionally handles a request before the built-in sources.
+	// It runs outside GeneratorBudget; the caller owns its deadline.
+	CompletionHook CompletionHook
 }
 
 const (
@@ -174,14 +177,45 @@ type Request struct {
 	Limit int
 }
 
-// Complete returns ranked completions for the line in req. It never returns an
-// error for the dynamic sources: a generator that fails or runs out of budget
-// contributes no rows, because a picker with a partial answer beats an error the
-// user cannot act on.
+// CompletionHook optionally takes ownership of a completion request. Request.Limit
+// is normalized before the call. Returning handled=false and a nil error falls
+// back to the built-in sources; handled=true suppresses them even with no items.
+// Any error propagates. Handled items retain their order and scores and are
+// truncated to the limit. The returned slice must be safe for the caller to own.
+//
+// Hooks run synchronously, outside GeneratorBudget, and must honor the caller's
+// context: the engine checks cancellation before and after, but cannot preempt a
+// callback. An Engine can invoke its hook concurrently; callbacks must be safe
+// for concurrent use.
+type CompletionHook func(context.Context, Request) ([]Item, bool, error)
+
+// Complete returns ranked completions for the line in req, or the hook's items
+// when it handles the request. Hook errors and cancellation propagate. A built-in
+// generator that fails or runs out of budget contributes no rows.
 func (e *Engine) Complete(ctx context.Context, req Request) ([]Item, error) {
 	limit := req.Limit
 	if limit <= 0 {
 		limit = e.opts.Limit
+	}
+
+	if hook := e.opts.CompletionHook; hook != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		req.Limit = limit
+		items, handled, err := hook(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if handled {
+			if len(items) > limit {
+				items = items[:limit]
+			}
+			return items, nil
+		}
 	}
 
 	sc := e.pool.Get().(*scratch)

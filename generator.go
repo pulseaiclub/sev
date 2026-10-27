@@ -14,6 +14,7 @@ const (
 	KindSpec      Kind = iota + 1 // a command or flag from the compiled spec tree
 	KindHistory                   // a line the user actually ran
 	KindGenerator                 // a dynamic argument (path, branch, …)
+	KindHook                      // a completion supplied by the optional hook
 )
 
 func (k Kind) String() string {
@@ -24,6 +25,8 @@ func (k Kind) String() string {
 		return "history"
 	case KindGenerator:
 		return "generator"
+	case KindHook:
+		return "hook"
 	default:
 		return "unknown"
 	}

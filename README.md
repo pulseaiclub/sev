@@ -1,8 +1,9 @@
 # sev
 
 A shell-command completion engine in Go. Give it the line a user is typing, get
-back ranked completions — in under a microsecond for everything that is memory,
-and inside a 20 ms budget for everything that is not.
+back ranked completions — in under a microsecond for memory lookups, with a
+20 ms budget for built-in dynamic sources. An optional completion hook lets the
+host supply completions under its own deadline.
 
 Built to be embedded in a TUI host (it is the completion core for
 [phi](../phi)), not to wrap a shell. There is no PTY, no raw mode, no overlay, no
@@ -45,8 +46,8 @@ its rows are dropped. In between, every cost is bounded by something other than
 the size of the user's data: spec rows by the arity of one node, history rows by
 a 512-entry shortlist, directory reads by 256-entry batches with a context check
 between them, and git answers by a process with a context and a `WaitDelay`.
-Nothing on the memory path allocates a snapshot, and nothing on the dynamic path
-runs without a deadline.
+Nothing on the memory path allocates a snapshot. Built-in dynamic sources run
+with a deadline; optional hooks use the caller's context.
 
 ## Use
 
@@ -89,6 +90,72 @@ line) is one call:
 n, err := e.History().LoadJSONL(f)
 ```
 
+## Optional completion hook
+
+By default sev makes no AI or network requests. Set `Options.CompletionHook` to
+opt in to a callback that can handle a whole request before tokenization,
+scratch allocation, or any built-in source:
+
+```go
+type CompletionHook func(context.Context, Request) ([]Item, bool, error)
+```
+
+The hook receives the original request with `Limit` normalized to the request's
+positive limit, the configured limit, or the default of 10. Its result controls
+completion:
+
+- `handled=false`, no error: run normal completion; ignore the hook's items.
+- `handled=true`, no error: return only the hook's items, even when empty.
+- Any error: return it to the caller, without fallback.
+
+Handled items retain their order and scores and are truncated to the limit.
+Use `KindHook` to label them. Return a slice the caller can own; concurrent calls
+must not share mutable result storage.
+
+Hooks run synchronously **outside `GeneratorBudget`**. The host owns deadlines
+and cancellation, including canceling superseded keystrokes. The engine checks
+context cancellation before and after the callback, but cannot preempt a
+callback that ignores its context. Hooks must support concurrent calls when the
+engine is shared.
+
+### Git commit messages
+
+`github.com/pulseaiclub/sev/commitmsg` supplies an optional hook for a conservative
+subset of `git commit -m`, `--message`, `-am`, and `-a -m` message entries:
+
+```go
+// generate has type commitmsg.Generate:
+// func(context.Context, string, string) (string, error).
+// The host supplies model calls, credentials, project rules, and network policy.
+completer := commitmsg.New(generate)
+e, err := sev.New(sev.Options{CompletionHook: completer.Complete})
+if err != nil {
+	return err
+}
+
+// This deadline includes the 300 ms debounce, Git reads, and model generation.
+ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
+defer cancel()
+items, err := e.Complete(ctx, sev.Request{
+	Line: "git commit -m 'fix: ",
+	Cwd:  "/repo",
+})
+```
+
+The completer reads Git state from `Request.Cwd` on each call, collects a bounded
+diff and recent subjects, validates the generated subject, and appends a safely
+quoted tail without changing the typed text. It returns one `KindHook` item with
+score 100. It keeps no repository cache or mutable request state; the supplied
+`Generate` callback must also support concurrent use.
+
+Unsupported syntax falls back immediately. Recognized input waits a cancellable
+300 ms before Git or generation. There is no additional timeout; a short caller
+deadline may expire during debounce. No changes, a non-repository, generation
+failures, and cancellation return errors and suppress fallback. The no-changes
+and non-repository errors implement `CompletionHint() string` for safe UI hints.
+The package has no model SDK or network client; only the injected callback can
+make model requests. See [the public example](commitmsg/example_test.go).
+
 ## How it works
 
 Three sources, merged under one score.
@@ -108,7 +175,7 @@ what followed the previous command. Reads take a shared lock and allocate no
 snapshot.
 
 **generator** — dynamic arguments: paths, directories, git branches/tags/remotes/
-stashes. These are the only sources allowed to block, so they run under
+stashes. These built-in sources may block, so they run under
 `Options.GeneratorBudget` (default 20 ms). A generator is called synchronously,
 so it owns its own preemption: the bundled ones check the context between
 batches and pass it to the process. Then:
@@ -164,8 +231,9 @@ and the engine has no runtime or build-time relationship with that project.
 
 Deliberately out of scope, because a TUI host already owns them: PTY wrapping and
 inline overlays, keybinding parsing, themes, config files, self-update, shell
-startup scripts, AI suggestions (a host with an LLM routes that itself), and
-persistence (history lives in the host's store, which is one interface away).
+startup scripts, model clients and credentials, and persistence (history lives
+in the host's store, which is one interface away). AI commit completion is an
+opt-in hook; the host supplies generation and owns its deadline.
 
 ## Releasing
 
